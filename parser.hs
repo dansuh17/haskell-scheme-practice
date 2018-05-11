@@ -12,6 +12,24 @@ data LispVal = Atom String  -- String naming the atom
              | Character String
              | Bool Bool
 
+-- pattern matching : destructures algebraic data types and selects code clause based on constructor
+showVal :: LispVal -> String
+showVal (String contents) = "\"" ++ contents ++ "\""
+showVal (Atom name) = name
+showVal (Number contents) = show contents
+showVal (Bool True) = "#t"
+showVal (Bool False) = "#f"
+showVal (List as) = "(" ++ unwordsList as ++ ")"
+showVal (DottedList head tail) = "(" ++ unwordsList head ++ " . " ++ showVal tail ++ ")"
+
+-- instance of Show typeclass = datatype LispVal having 'show' function
+instance Show LispVal where show = showVal
+
+-- unwords glues together list of words with spaces
+unwordsList :: [LispVal] -> String
+unwordsList = unwords . map showVal  -- point-free style
+
+-- symbols in Lisp
 symbol :: Parser Char
 symbol = oneOf "!#$%&|*+-/:<=>?@^_~"
 
@@ -21,10 +39,18 @@ spaces = skipMany1 space
 
 -- here, bind means "attempt to match the first parser,
 -- then attempt to match the second with the remaining input, and faile if either fails.
+{-
 readExpr :: String -> String
 readExpr input = case parse parseExpr "lisp" input of
   Left err -> "No match: " ++ show err
-  Right val -> "Found value"
+  Right val -> "Found " ++ show val
+-}
+
+-- new readExpr that returns a value
+readExpr :: String -> LispVal
+readExpr input = case parse parseExpr "lisp" input of
+  Left err -> String $ "No match: " ++ show err
+  Right val -> val
 
 -- parse scheme character, having forms #\<character>
 parseCharacter :: Parser LispVal
@@ -91,7 +117,7 @@ parseDottedList = do
   return $ DottedList head tail
 
 -- single-quote syntactic sugar of Scheme
-parseQuoted :: ParserLispVal
+parseQuoted :: Parser LispVal
 parseQuoted = do
   char '\''
   x <- parseExpr
@@ -108,7 +134,57 @@ parseExpr = parseAtom
          char ')'
          return x
 
+eval :: LispVal -> LispVal -- Lisp has save types for both code and data
+eval val@(String _) = val
+eval val@(Number _) = val
+eval val@(Bool _) = val
+eval (List [Atom "quote", val]) = val
+-- apply function to a list of evaluated args
+-- for example, (+ 2 2) would be applying [Number 2, Number 2] to "+"
+eval (List (Atom func : args)) = apply func $ map eval args
+
+-- maybe returns (Bool False) if not found, or applies ($ args) to return value of the last argument
+-- lookup looks for keys in a list of pairs
+apply :: String -> [LispVal] -> LispVal
+apply func args = maybe (Bool False) ($ args) $ lookup func primitives
+
+primitives :: [(String, [LispVal] -> LispVal)]
+primitives = [
+  ("+", numericBinop (+)),
+  ("-", numericBinop (-)),
+  ("*", numericBinop (*)),
+  ("/", numericBinop div),
+  ("mod", numericBinop mod),
+  ("quotient", numericBinop quot),
+  ("remainder", numericBinop rem),
+  ("symbol?", checkType "symbol"),
+  ("string?", checkType "string"),
+  ("number?", checkType "number")]
+
+checkType :: String -> [LispVal] -> LispVal
+checkType "string" [(String _)] = Bool True
+checkType "symbol" [(Atom _)] = Bool True
+checkType "number" [(Number _)] = Bool True
+checkType _ _ = Bool False
+
+-- foldl does not restrict number of params to 2
+numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
+numericBinop op params = Number $ foldl1 op $ map unpackNum params
+
+-- convert LispVal to Integer
+unpackNum :: LispVal -> Integer
+unpackNum (Number n) = n
+unpackNum (String n) = let parsed = reads n :: [(Integer, String)] in
+                         if null parsed then 0 else fst $ parsed !! 0  -- error
+unpackNum (List [n]) = unpackNum n
+unpackNum _ = 0  -- error
+
+{-
 main :: IO ()
 main = do
   (expr:_) <- getArgs
   putStrLn (readExpr expr)
+-}
+
+main :: IO ()
+main = getArgs >>= print . eval . readExpr . head
