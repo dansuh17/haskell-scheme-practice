@@ -1,6 +1,7 @@
 import Text.ParserCombinators.Parsec hiding (spaces)
 import System.Environment
 import Control.Monad
+import Control.Monad.Except --- built-in error functions (Either)
 
 -- algebraic data type
 -- each are constructors
@@ -11,6 +12,29 @@ data LispVal = Atom String  -- String naming the atom
              | String String
              | Character String
              | Bool Bool
+
+-- lisp error represented
+data LispError = NumArgs Integer [LispVal]
+               | TypeMismatch String LispVal
+               | Parser ParseError
+               | BadSpecialForm String LispVal
+               | NotFunction String String
+               | UnboundVar String String
+               | Default String
+
+showError :: LispError -> String
+showError (UnboundVar message varname) = message ++ ": " ++ varname
+showError (BadSpecialForm message form) = message ++ ": " ++ show form
+showError (NotFunction message func) = message ++ ": " ++ show func
+showError (NumArgs expected found) = "Expected " ++ show expected ++ " args; found values " ++ unwordsList found
+showError (TypeMismatch expected found) = "Invalid type: expected " ++ expected
+showError (Parser parseErr) = "Parse error at " ++ show parseErr
+
+-- make it an instance of Show typeclass
+instance Show LispError where show = showError
+
+-- curried type constructors  -- can also be partially applied
+type ThrowsError = Either LispError
 
 -- pattern matching : destructures algebraic data types and selects code clause based on constructor
 showVal :: LispVal -> String
@@ -47,10 +71,18 @@ readExpr input = case parse parseExpr "lisp" input of
 -}
 
 -- new readExpr that returns a value
+{-
 readExpr :: String -> LispVal
 readExpr input = case parse parseExpr "lisp" input of
   Left err -> String $ "No match: " ++ show err
   Right val -> val
+-}
+
+-- error-handling version
+readExpr :: String -> ThrowsError LispVal
+readExpr input = case parse parseExpr "lisp" input of
+  Left err -> throwError $ Parser err
+  Right val -> return val
 
 -- parse scheme character, having forms #\<character>
 parseCharacter :: Parser LispVal
@@ -134,6 +166,7 @@ parseExpr = parseAtom
          char ')'
          return x
 
+{-
 eval :: LispVal -> LispVal -- Lisp has save types for both code and data
 eval val@(String _) = val
 eval val@(Number _) = val
@@ -142,13 +175,39 @@ eval (List [Atom "quote", val]) = val
 -- apply function to a list of evaluated args
 -- for example, (+ 2 2) would be applying [Number 2, Number 2] to "+"
 eval (List (Atom func : args)) = apply func $ map eval args
+-}
+
+-- eval now returns 'Either LispError LispVal'
+-- throwError
+eval :: LispVal -> ThrowsError LispVal
+eval val@(String _) = return val
+eval val@(Number _) = return val
+eval val@(Bool _) = return val
+eval (List [Atom "quote", val]) = return val
+-- mapM maps a monadic function over a list of values,
+-- sequences the resulting actions together with bind, and returns the list of inner results
+-- mapM :: Monad m => (a -> m b) -> [a] -> m [b]
+eval (List (Atom func : args)) = mapM eval args >>= apply func
+eval badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
+-- throwError :: e -> m a
 
 -- maybe returns (Bool False) if not found, or applies ($ args) to return value of the last argument
 -- lookup looks for keys in a list of pairs
+{-
 apply :: String -> [LispVal] -> LispVal
 apply func args = maybe (Bool False) ($ args) $ lookup func primitives
+-}
 
-primitives :: [(String, [LispVal] -> LispVal)]
+-- error throwing version
+-- now maybe returns a LispError if not found, or applies ($ args) to return value
+-- of the last argument
+apply :: String -> [LispVal] -> ThrowsError LispVal
+apply func args =
+  maybe (throwError $ NotFunction "Unrecognized primitive function args" func)
+        ($ args)
+        (lookup func primitives)
+
+primitives :: [(String, [LispVal] -> ThrowsError LispVal)]
 primitives = [
   ("+", numericBinop (+)),
   ("-", numericBinop (-)),
@@ -168,16 +227,30 @@ checkType "number" [(Number _)] = Bool True
 checkType _ _ = Bool False
 
 -- foldl does not restrict number of params to 2
-numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> LispVal
-numericBinop op params = Number $ foldl1 op $ map unpackNum params
+numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
+-- numericBinop op params = Number $ foldl1 op $ map unpackNum params
+numericBinop op [] = throwError $ NumArgs 2 []
+numericBinop op singleVal@[_] = throwError $ NumArgs 2 singleVal
+numericBinop op params = mapM unpackNum params >>= return . Number . foldl1 op
 
 -- convert LispVal to Integer
+{-
 unpackNum :: LispVal -> Integer
 unpackNum (Number n) = n
 unpackNum (String n) = let parsed = reads n :: [(Integer, String)] in
                          if null parsed then 0 else fst $ parsed !! 0  -- error
 unpackNum (List [n]) = unpackNum n
 unpackNum _ = 0  -- error
+-}
+
+unpackNum :: LispVal -> ThrowsError Integer
+unpackNum (Number n) = return n
+unpackNum (String n) = let parsed = reads n in
+  if null parsed
+    then throwError $ TypeMismatch "number" $ String n
+    else return return $ fst $ parsed !! 0
+unpackNum (List [n]) = unpackNum n
+unpackNum notNum = throwError $ TypeMismatch "number" notNum
 
 {-
 main :: IO ()
@@ -186,5 +259,24 @@ main = do
   putStrLn (readExpr expr)
 -}
 
+{-
 main :: IO ()
 main = getArgs >>= print . eval . readExpr . head
+-}
+
+-- catchError takes an Either and a function that turns an error into Either.
+-- if the action represents an error, it applies the function
+-- catchError :: m a -> (e -> m a) -> m a
+trapError action = catchError action (return . show)
+
+-- intentionally undefine Left constructor pattern - represents programmer error
+-- we intend to use extractVAlue only after catchError
+extractValue :: ThrowsError a -> a
+extractValue (Right val) = val
+
+main :: IO ()
+main = do
+  args <- getArgs
+  -- >>= has higher precedence than $
+  evaled <- return $ liftM show $ readExpr (args !! 0) >>= eval
+  putStrLn $ extractValue $ trapError evaled
