@@ -218,13 +218,26 @@ primitives = [
   ("remainder", numericBinop rem),
   ("symbol?", checkType "symbol"),
   ("string?", checkType "string"),
-  ("number?", checkType "number")]
+  ("number?", checkType "number"),
+  ("=", numBoolBinop (==)),
+  ("<", numBoolBinop (<)),
+  (">", numBoolBinop (>)),
+  ("/=", numBoolBinop (/=)),
+  (">=", numBoolBinop (>=)),
+  ("<=", numBoolBinop (<=)),
+  ("&&", boolBoolBinop (&&)),
+  ("||", boolBoolBinop (||)),
+  ("string=?", strBoolBinop (==)),
+  ("string<?", strBoolBinop (<)),
+  ("string>?", strBoolBinop (>)),
+  ("string<=?", strBoolBinop (<=)),
+  ("string>=?", strBoolBinop (>=))]
 
-checkType :: String -> [LispVal] -> LispVal
-checkType "string" [(String _)] = Bool True
-checkType "symbol" [(Atom _)] = Bool True
-checkType "number" [(Number _)] = Bool True
-checkType _ _ = Bool False
+checkType :: String -> [LispVal] -> ThrowsError LispVal
+checkType "string" [(String _)] = return $ Bool True
+checkType "symbol" [(Atom _)] = return $ Bool True
+checkType "number" [(Number _)] = return $ Bool True
+checkType _ _ = return $ Bool False
 
 -- foldl does not restrict number of params to 2
 numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError LispVal
@@ -232,6 +245,18 @@ numericBinop :: (Integer -> Integer -> Integer) -> [LispVal] -> ThrowsError Lisp
 numericBinop op [] = throwError $ NumArgs 2 []
 numericBinop op singleVal@[_] = throwError $ NumArgs 2 singleVal
 numericBinop op params = mapM unpackNum params >>= return . Number . foldl1 op
+
+boolBinop :: (LispVal -> ThrowsError a) -> (a -> a -> Bool) -> [LispVal] -> ThrowsError LispVal
+boolBinop unpacker op args =
+  if length args /= 2
+    then throwError $ NumArgs 2 args
+    else do left <- unpacker $ args !! 0
+            right <- unpacker $ args !! 1
+            return $ Bool $ left `op` right
+
+numBoolBinop = boolBinop unpackNum
+strBoolBinop = boolBinop unpackStr
+boolBoolBinop = boolBinop unpackBool
 
 -- convert LispVal to Integer
 {-
@@ -248,9 +273,19 @@ unpackNum (Number n) = return n
 unpackNum (String n) = let parsed = reads n in
   if null parsed
     then throwError $ TypeMismatch "number" $ String n
-    else return return $ fst $ parsed !! 0
+    else return $ fst $ parsed !! 0
 unpackNum (List [n]) = unpackNum n
 unpackNum notNum = throwError $ TypeMismatch "number" notNum
+
+unpackStr :: LispVal -> ThrowsError String
+unpackStr (String s) = return s
+unpackStr (Number s) = return $ show s
+unpackStr (Bool s) = return $ show s
+unpackStr notString = throwError $ TypeMismatch "string" notString
+
+unpackBool :: LispVal -> ThrowsError Bool
+unpackBool (Bool b) = return b
+unpackBool notBool = throwError $ TypeMismatch "boolean" notBool
 
 {-
 main :: IO ()
@@ -277,6 +312,9 @@ extractValue (Right val) = val
 main :: IO ()
 main = do
   args <- getArgs
+  -- liftM :: Monad m => (a1 -> r) -> m a1 -> m r
   -- >>= has higher precedence than $
+  -- takes the first argument, parse it to eval, call show, and return to make it an IO action
+  -- evaled :: ThrowsError String
   evaled <- return $ liftM show $ readExpr (args !! 0) >>= eval
   putStrLn $ extractValue $ trapError evaled
