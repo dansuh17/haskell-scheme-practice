@@ -4,6 +4,17 @@ import System.Environment
 import Control.Monad
 import Control.Monad.Except --- built-in error functions (Either)
 import System.IO
+import Data.IORef
+
+-- STATE HANDLING - state threads with IORef: "mutable variable within IO monad"
+-- ST monad creates a stateful computation
+-- no state escapes to the rest of the program
+type Env = IORef [(String, IORef LispVal)]  -- IORef holding a list that maps Strings to mutable LispVals
+
+-- IORefs can only be used with IO monad
+-- this helper action creates an empty environment
+nullEnv :: IO Env
+nullEnv = newIORef []  -- builds a new IORef : newIORef :: a -> IO (IORef a)
 
 -- algebraic data type
 -- each are constructors
@@ -416,6 +427,9 @@ main = do
   evaled <- return $ liftM show $ readExpr (args !! 0) >>= eval
   putStrLn $ extractValue $ trapError evaled
 -}
+
+-- STATE HANDLING
+
 
 main :: IO ()
 main = do
