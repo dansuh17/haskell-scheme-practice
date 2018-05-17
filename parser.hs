@@ -16,6 +16,62 @@ type Env = IORef [(String, IORef LispVal)]  -- IORef holding a list that maps St
 nullEnv :: IO Env
 nullEnv = newIORef []  -- builds a new IORef : newIORef :: a -> IO (IORef a)
 
+-- ExceptT : kind of monad transformers
+-- error handling functionality on top of IO monad
+-- ExceptT :: e (m :: * -> *) a, where e == exception type, m == inner monad
+type IOThrowsError = ExceptT LispError IO  -- combined monad
+
+liftThrows :: ThrowsError a -> IOThrowsError a
+liftThrows (Left err) = throwError err
+liftThrows (Right val) = return val
+
+-- runErrorT :: ErrorT e m a -> m (Either e a)
+runIOThrows :: IOThrowsError String -> IO String
+runIOThrows action = runExceptT (trapError action) >>= return . extractValue
+
+-- determine if given variable is already bound in the env.
+-- readIORef extracts the actual envioronment value from IORef
+isBound :: Env -> String -> IO Bool
+isBound envRef var = readIORef envRef >>= return . maybe False (const True) . lookup var
+
+-- retrieves the variable from the environment
+getVar :: Env -> String -> IOThrowsError LispVal
+getVar envRef var = do
+  -- liftIO lifts readIORef action into the combined monad (IOThrowsError)
+  env <- liftIO $ readIORef envRef
+  maybe (throwError $ UnboundVar "Getting an unbound variable" var) (liftIO . readIORef) (lookup var env)
+
+setVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+setVar envRef var value = do
+  env <- liftIO $ readIORef envRef
+  maybe (throwError $ UnboundVar "Setting an unbound variable" var)
+        (liftIO . (flip writeIORef value))  -- writeIORef :: IORef a -> a -> IO ()
+        (lookup var env)
+  return value
+
+-- define a new var with value
+defineVar :: Env -> String -> LispVal -> IOThrowsError LispVal
+defineVar envRef var value = do
+  alreadyDefined <- liftIO $ isBound envRef var
+  if alreadyDefined
+    then setVar envRef var value >> return value
+    else liftIO $ do
+      valueRef <- newIORef value  -- create new value (IORef)
+      env <- readIORef envRef  -- read in the environment
+      writeIORef envRef ((var, valueRef) : env)  -- replace the environment with new value added
+      return value
+
+-- bind bunch of variables at once
+bindVars :: Env -> [(String, LispVal)] -> IO Env
+bindVars envRef bindings = readIORef envRef >>= extendEnv bindings >>= newIORef  -- why newIORef? why not return?
+  where
+    extendEnv bindings env = liftM (++ env) (mapM addBinding bindings)
+    -- addBinding returns an IORef-ed var, value pair
+    addBinding (var, value) = do
+      ref <- newIORef value
+      return (var, ref)
+
+
 -- algebraic data type
 -- each are constructors
 data LispVal = Atom String  -- String naming the atom
@@ -190,6 +246,7 @@ eval (List [Atom "quote", val]) = val
 eval (List (Atom func : args)) = apply func $ map eval args
 -}
 
+{-
 -- eval now returns 'Either LispError LispVal'
 -- throwError
 eval :: LispVal -> ThrowsError LispVal
@@ -208,6 +265,26 @@ eval (List [Atom "if", pred, conseq, alt]) =
 eval (List (Atom func : args)) = mapM eval args >>= apply func
 eval badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
 -- throwError :: e -> m a
+--}
+
+-- eval (ver. IOThrowsError (environment handling))
+eval :: Env -> LispVal -> IOThrowsError LispVal
+eval env val@(String _) = return val
+eval env val@(Number _) = return val
+eval env val@(Bool _) = return val
+eval env (Atom id) = getVar env id
+eval env (List [Atom "quote", val]) = return val
+eval env (List [Atom "if", pred, conseq, alt]) = do
+  result <- eval env pred
+  case result of
+    Bool False -> eval env alt
+    otherwise -> eval env conseq
+eval env (List [Atom "set!", Atom var, form]) =
+  eval env form >>= setVar env var  -- set with an evaluated value
+eval env (List [Atom "define", Atom var, form]) =
+  eval env form >>= defineVar env var
+eval env (List (Atom func: args)) = mapM (eval env) args >>= liftThrows . apply func
+eval env badForm = throwError $ BadSpecialForm "Unrecognized special form" badForm
 
 -- maybe returns (Bool False) if not found, or applies ($ args) to return value of the last argument
 -- lookup looks for keys in a list of pairs
@@ -396,12 +473,23 @@ flushStr str = putStr str >> hFlush stdout
 readPrompt :: String -> IO String
 readPrompt prompt = flushStr prompt >> getLine
 
+{-
 evalString :: String -> IO String
 evalString expr = return $ extractValue $ trapError (liftM show $ readExpr expr >>= eval)
 
 -- putStrLn :: String -> IO ()
 evalAndPrint :: String -> IO ()
 evalAndPrint expr = evalString expr >>= putStrLn
+-}
+
+evalAndPrint :: Env -> String -> IO ()
+evalAndPrint env expr = evalString env expr >>= putStrLn
+
+-- need runIOThrows to convert IOThrowsError to IO String
+-- liftThrows converts LispVal -> IOThrowsError
+evalString :: Env -> String -> IO String
+evalString env expr = runIOThrows $ liftM show $ (liftThrows $ readExpr expr) >>= eval env
+
 
 -- built-in `interact` might help us do the infinite loop for us,
 -- but we have our own loop
@@ -412,9 +500,19 @@ until_ pred prompt action = do
        then return ()
        else action result >> until_ pred prompt action
 
+{-
 -- runs the REPL. prints out prompt 'Lisp>>>', and tests if the user put 'quit' as input
 runRepl :: IO ()
 runRepl = until_ (== "quit") (readPrompt "Lisp>>>") evalAndPrint
+-}
+-- REPL - IOThrowsError version
+-- initialize with null environment
+runRepl :: IO ()
+runRepl = nullEnv >>= until_ (== "quit") (readPrompt "Lisp>>> ") . evalAndPrint
+
+runOne :: String -> IO ()
+runOne expr = nullEnv >>= flip evalAndPrint expr
+
 
 {-
 main :: IO ()
@@ -436,5 +534,5 @@ main = do
   args <- getArgs
   case length args of
     0 -> runRepl
-    1 -> evalAndPrint $ args !! 0
+    1 -> runOne $ args !! 0
     otherwise -> putStrLn "Program takes only 0 or 1 argument"
