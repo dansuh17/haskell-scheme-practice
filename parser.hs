@@ -3,6 +3,7 @@ import Text.ParserCombinators.Parsec hiding (spaces)
 import System.Environment
 import Control.Monad
 import Control.Monad.Except --- built-in error functions (Either)
+import System.IO
 
 -- algebraic data type
 -- each are constructors
@@ -237,7 +238,10 @@ primitives = [
   ("string<?", strBoolBinop (<)),
   ("string>?", strBoolBinop (>)),
   ("string<=?", strBoolBinop (<=)),
-  ("string>=?", strBoolBinop (>=))]
+  ("string>=?", strBoolBinop (>=)),
+  ("cons", cons),
+  ("car", car),
+  ("cdr", cdr)]
 
 checkType :: String -> [LispVal] -> ThrowsError LispVal
 checkType "string" [(String _)] = return $ Bool True
@@ -369,6 +373,39 @@ trapError action = catchError action (return . show)
 extractValue :: ThrowsError a -> a
 extractValue (Right val) = val
 
+-------------------------------------------------------------------------------------
+
+-- prints out the string to stdout and flush
+-- hFlush :: Handle -> IO ()
+-- putStr :: String -> IO ()  -- write a string to stdout
+flushStr :: String -> IO ()
+flushStr str = putStr str >> hFlush stdout
+
+-- prints out a prompt and reads in a line of input
+readPrompt :: String -> IO String
+readPrompt prompt = flushStr prompt >> getLine
+
+evalString :: String -> IO String
+evalString expr = return $ extractValue $ trapError (liftM show $ readExpr expr >>= eval)
+
+-- putStrLn :: String -> IO ()
+evalAndPrint :: String -> IO ()
+evalAndPrint expr = evalString expr >>= putStrLn
+
+-- built-in `interact` might help us do the infinite loop for us,
+-- but we have our own loop
+until_ :: Monad m => (a -> Bool) -> m a -> (a -> m ()) -> m ()
+until_ pred prompt action = do
+    result <- prompt
+    if pred result
+       then return ()
+       else action result >> until_ pred prompt action
+
+-- runs the REPL. prints out prompt 'Lisp>>>', and tests if the user put 'quit' as input
+runRepl :: IO ()
+runRepl = until_ (== "quit") (readPrompt "Lisp>>>") evalAndPrint
+
+{-
 main :: IO ()
 main = do
   args <- getArgs
@@ -378,3 +415,12 @@ main = do
   -- evaled :: ThrowsError String
   evaled <- return $ liftM show $ readExpr (args !! 0) >>= eval
   putStrLn $ extractValue $ trapError evaled
+-}
+
+main :: IO ()
+main = do
+  args <- getArgs
+  case length args of
+    0 -> runRepl
+    1 -> evalAndPrint $ args !! 0
+    otherwise -> putStrLn "Program takes only 0 or 1 argument"
